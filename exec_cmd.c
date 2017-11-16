@@ -2,53 +2,187 @@
 #include "exec_cmd.h"
 #include "quote.h"
 #include "argv-array.h"
+
+#if defined(RUNTIME_PREFIX) && defined(HAVE_NS_GET_EXECUTABLE_PATH)
+#include <mach-o/dyld.h>
+#endif
+
 #define MAX_ARGS	32
 
 static const char *argv_exec_path;
 
+static const char *system_prefix(void);
+
 #ifdef RUNTIME_PREFIX
-static const char *argv0_path;
+
+/**
+ * When using a runtime prefix, Git dynamically resolves paths relative to its
+ * executable.
+ *
+ * The method for determining the path of the executable is highly
+ * platform-specific.
+ */
+
+/**
+ * Path to the current Git executable. Resolved on startup by
+ * 'git_resolve_executable_dir'.
+ */
+static const char *executable_dirname;
 
 static const char *system_prefix(void)
 {
 	static const char *prefix;
 
-	assert(argv0_path);
-	assert(is_absolute_path(argv0_path));
+	assert(executable_dirname);
+	assert(is_absolute_path(executable_dirname));
 
 	if (!prefix &&
-	    !(prefix = strip_path_suffix(argv0_path, GIT_EXEC_PATH)) &&
-	    !(prefix = strip_path_suffix(argv0_path, BINDIR)) &&
-	    !(prefix = strip_path_suffix(argv0_path, "git"))) {
+	    !(prefix = strip_path_suffix(executable_dirname, GIT_EXEC_PATH)) &&
+	    !(prefix = strip_path_suffix(executable_dirname, BINDIR)) &&
+	    !(prefix = strip_path_suffix(executable_dirname, "git"))) {
 		prefix = PREFIX;
 		trace_printf("RUNTIME_PREFIX requested, "
-				"but prefix computation failed.  "
-				"Using static fallback '%s'.\n", prefix);
+			     "but prefix computation failed.  "
+			     "Using static fallback '%s'.\n",
+			     prefix);
 	}
 	return prefix;
 }
 
-void git_extract_argv0_path(const char *argv0)
+/*
+ * Resolves the executable path from argv[0], only if it is absolute.
+ *
+ * Returns 0 on success, -1 on failure.
+ */
+static int git_get_exec_path_from_argv0(struct strbuf *buf, const char *argv0)
 {
 	const char *slash;
 
 	if (!argv0 || !*argv0)
-		return;
+		return -1;
 
 	slash = find_last_dir_sep(argv0);
+	if (slash) {
+		trace_printf("Determined executable path from argv0: %s\n",
+			     argv0);
+		strbuf_add_absolute_path(buf, argv0);
+		return 0;
+	}
+	return -1;
+}
 
-	if (slash)
-		argv0_path = xstrndup(argv0, slash - argv0);
+#ifdef PROCFS_EXECUTABLE_PATH
+/*
+ * Resolves the executable path by examining a procfs symlink.
+ *
+ * Returns 0 on success, -1 on failure.
+ */
+static int git_get_exec_path_procfs(struct strbuf *buf)
+{
+	char *path = realpath(PROCFS_EXECUTABLE_PATH, NULL);
+	if (path) {
+		trace_printf("Determined executable path from procfs: %s\n",
+			     path);
+		strbuf_addstr(buf, path);
+		free(path);
+		return 0;
+	}
+	return -1;
+}
+#endif /* PROCFS_EXECUTABLE_PATH */
+
+#ifdef HAVE_NS_GET_EXECUTABLE_PATH
+/*
+ * Resolves the executable path by querying Darwin applicaton stack.
+ *
+ * Returns 0 on success, -1 on failure.
+ */
+static int git_get_exec_path_darwin(struct strbuf *buf)
+{
+	char path[PATH_MAX];
+	uint32_t size = sizeof(path);
+	if (!_NSGetExecutablePath(path, &size)) {
+		trace_printf(
+			"Determined executable path from Darwin stack: %s\n",
+			path);
+		strbuf_addstr(buf, path);
+		return 0;
+	}
+	return -1;
+}
+#endif /* HAVE_NS_GET_EXECUTABLE_PATH */
+
+/*
+ * Resolves the absolute path of the current executable by employing
+ * one or more platform-specific methods.
+ *
+ * Returns 0 on success, -1 on failure.
+ */
+static int git_get_exec_path(struct strbuf *buf, const char *argv0)
+{
+	if (
+#ifdef PROCFS_EXECUTABLE_PATH
+		git_get_exec_path_procfs(buf) &&
+#endif /* PROCFS_EXECUTABLE_PATH */
+#ifdef HAVE_NS_GET_EXECUTABLE_PATH
+		git_get_exec_path_darwin(buf) &&
+#endif /* HAVE_NS_GET_EXECUTABLE_PATH */
+		git_get_exec_path_from_argv0(buf, argv0)) {
+		return -1;
+	}
+
+	if (strbuf_normalize_path(buf)) {
+		trace_printf("Could not normalize path: %s\n", buf->buf);
+		return -1;
+	}
+
+	return 0;
+}
+
+void git_resolve_executable_dir(const char *argv0)
+{
+	struct strbuf buf = STRBUF_INIT;
+	char *resolved;
+	const char *slash;
+	const char *path;
+
+	path = getenv(EXEC_PATH_ENVIRONMENT);
+	if (path) {
+		trace_printf("Determined executable path from ENV: %s\n", path);
+		executable_dirname = path;
+	} else {
+		if (git_get_exec_path(&buf, argv0)) {
+			trace_printf(
+				"Could not determine executable path from: %s\n",
+				argv0);
+			strbuf_release(&buf);
+			return;
+		}
+
+		resolved = strbuf_detach(&buf, NULL);
+		slash = find_last_dir_sep(resolved);
+		if (slash)
+			resolved[slash - resolved] = '\0';
+
+		executable_dirname = resolved;
+	}
+
+	trace_printf("Determined executable dir: %s\n", executable_dirname);
 }
 
 #else
+
+/**
+ * When not using a runtime prefix, Git uses a hard-coded path, and there is
+ * nothing to resolve.
+ */
 
 static const char *system_prefix(void)
 {
 	return PREFIX;
 }
 
-void git_extract_argv0_path(const char *argv0)
+void git_resolve_executable_dir(const char *argv0)
 {
 }
 
@@ -65,7 +199,7 @@ char *system_path(const char *path)
 	return strbuf_detach(&d, NULL);
 }
 
-void git_set_argv_exec_path(const char *exec_path)
+void git_set_exec_path(const char *exec_path)
 {
 	argv_exec_path = exec_path;
 	/*
@@ -73,7 +207,6 @@ void git_set_argv_exec_path(const char *exec_path)
 	 */
 	setenv(EXEC_PATH_ENVIRONMENT, exec_path, 1);
 }
-
 
 /* Returns the highest-priority, location to look for git programs. */
 const char *git_exec_path(void)
@@ -101,12 +234,14 @@ static void add_path(struct strbuf *out, const char *path)
 	}
 }
 
-void setup_path(void)
+void setup_path_and_env(void)
 {
+	const char *exec_path = git_exec_path();
 	const char *old_path = getenv("PATH");
 	struct strbuf new_path = STRBUF_INIT;
 
-	add_path(&new_path, git_exec_path());
+	git_set_exec_path(exec_path);
+	add_path(&new_path, exec_path);
 
 	if (old_path)
 		strbuf_addstr(&new_path, old_path);
@@ -116,6 +251,20 @@ void setup_path(void)
 	setenv("PATH", new_path.buf, 1);
 
 	strbuf_release(&new_path);
+
+	/*
+	 * If RUNTIME_PREFIX is set, the relative PERL library and locale paths
+	 * must be exported for invoked programs to inherit the calculated
+	 * runtime path.
+	 *
+	 * When RUNTIME_PREFIX is defined, Git's PERL include path is always
+	 * "$(PREFIX)/lib" (by setting NO_PERL_MAKEMAKER).
+	 */
+#ifdef RUNTIME_PREFIX
+	setenv(GIT_TEXT_DOMAIN_DIR_ENVIRONMENT, system_path(GIT_LOCALE_PATH),
+	       1);
+	setenv(GIT_PERL_LIB_ENVIRONMENT, system_path("lib"), 1);
+#endif /* RUNTIME_PREFIX */
 }
 
 const char **prepare_git_cmd(struct argv_array *out, const char **argv)
@@ -125,7 +274,8 @@ const char **prepare_git_cmd(struct argv_array *out, const char **argv)
 	return out->argv;
 }
 
-int execv_git_cmd(const char **argv) {
+int execv_git_cmd(const char **argv)
+{
 	struct argv_array nargv = ARGV_ARRAY_INIT;
 
 	prepare_git_cmd(&nargv, argv);
@@ -140,8 +290,7 @@ int execv_git_cmd(const char **argv) {
 	return -1;
 }
 
-
-int execl_git_cmd(const char *cmd,...)
+int execl_git_cmd(const char *cmd, ...)
 {
 	int argc;
 	const char *argv[MAX_ARGS + 1];

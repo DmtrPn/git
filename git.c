@@ -65,7 +65,7 @@ static int handle_options(const char ***argv, int *argc, int *envchanged)
 		 */
 		if (skip_prefix(cmd, "--exec-path", &cmd)) {
 			if (*cmd == '=')
-				git_set_argv_exec_path(cmd + 1);
+				git_set_exec_path(cmd + 1);
 			else {
 				puts(git_exec_path());
 				exit(0);
@@ -676,8 +676,11 @@ int cmd_main(int argc, const char **argv)
 	 * precedence paths: the "--exec-path" option, the GIT_EXEC_PATH
 	 * environment, and the $(gitexecdir) from the Makefile at build
 	 * time.
+	 *
+	 * If RUNTIME_PREFIX is defined, we export some additional environment
+	 * variables to help subprocess code identify runtime-derived paths.
 	 */
-	setup_path();
+	setup_path_and_env();
 
 	while (1) {
 		int was_alias = run_argv(&argc, &argv);

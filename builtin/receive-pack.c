@@ -1947,7 +1947,7 @@ int cmd_receive_pack(int argc, const char **argv, const char *prefix)
 
 	service_dir = argv[0];
 
-	setup_path();
+	setup_path_and_env();
 
 	if (!enter_repo(service_dir, 0))
 		die("'%s' does not appear to be a git repository", service_dir);

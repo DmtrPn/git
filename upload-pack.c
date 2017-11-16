@@ -1058,7 +1058,7 @@ int cmd_main(int argc, const char **argv)
 	if (timeout)
 		daemon_mode = 1;
 
-	setup_path();
+	setup_path_and_env();
 
 	dir = argv[0];
 
