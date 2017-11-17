@@ -12,7 +12,7 @@ static int do_generic_cmd(const char *me, char *arg)
 {
 	const char *my_argv[4];
 
-	setup_path();
+	setup_path_and_env();
 	if (!arg || !(arg = sq_dequote(arg)) || *arg == '-')
 		die("bad argument");
 	if (!starts_with(me, "git-"))
